@@ -22,8 +22,10 @@ import { useAuth } from '../context';
 import {
   isOwner as checkIsOwner,
   getWorkspaceStatus,
+  getWorkspaceStatusLabel,
   getStatusChipColor,
   getWorkspaceOwner,
+  isOwnerOrPublic,
   acceleratorLimits,
   formatCpuCores,
   formatMemoryGiB,
@@ -104,11 +106,12 @@ export function WorkspaceDetail() {
   }
 
   const workspaceStatus = getWorkspaceStatus(workspace);
+  const { label: statusLabel } = getWorkspaceStatusLabel(workspace);
   const accessURL = workspace.status?.accessURL;
   const isRunning = workspace.spec.desiredStatus === 'Running';
   const owner = getWorkspaceOwner(workspace);
   const ownerMatch = checkIsOwner(owner, user?.k8sUser);
-  const canOpen = workspaceStatus === 'Running' && accessURL && (ownerMatch || workspace.spec.accessType === 'Public');
+  const canOpen = workspaceStatus === 'Running' && accessURL && isOwnerOrPublic(workspace, user?.k8sUser);
 
   const handleStart = () => startMutation.mutate(workspace.metadata.name);
   const handleStop = () => stopMutation.mutate(workspace.metadata.name);
@@ -183,7 +186,7 @@ export function WorkspaceDetail() {
               {strings.workspace.detailInfo}
             </Typography>
             <Stack gap={1}>
-              <InfoRow label="Status" value={<Chip size="small" label={workspaceStatus} color={getStatusChipColor(workspaceStatus)} />} />
+              <InfoRow label="Status" value={<Chip size="small" label={statusLabel} color={getStatusChipColor(workspaceStatus)} />} />
               <InfoRow label={strings.namespace.label} value={<Chip size="small" label={workspace.metadata.namespace} variant="outlined" />} />
               <InfoRow
                 label="Image"

@@ -18,7 +18,7 @@ describe('workspaceToResponse', () => {
       spec: { displayName: 'My WS', image: 'jupyter:latest', desiredStatus: 'Running' },
       status: {
         accessURL: 'https://ws.example.com',
-        conditions: [{ type: 'Available', status: 'True', reason: 'Ready', message: 'ok' }],
+        conditions: [{ type: 'Available', status: 'True', reason: 'Ready', message: 'ok', lastTransitionTime: '2024-01-01T00:05:00Z' }],
       },
     };
     const res = workspaceToResponse(ws);
@@ -32,14 +32,14 @@ describe('workspaceToResponse', () => {
       spec: ws.spec,
       status: {
         accessURL: 'https://ws.example.com',
-        conditions: [{ type: 'Available', status: 'True', reason: 'Ready', message: 'ok' }],
+        conditions: [{ type: 'Available', status: 'True', reason: 'Ready', message: 'ok', lastTransitionTime: '2024-01-01T00:05:00Z' }],
       },
     });
   });
 
   // Defensive defaults matter: the frontend calls .map on conditions and reads
   // annotations as a dict. undefined → TypeError.
-  test('defaults missing metadata/status fields so frontend never sees undefined', () => {
+  test('defaults the required metadata and status fields when they are missing', () => {
     const ws = {
       apiVersion: 'workspace.jupyter.org/v1alpha1',
       kind: 'Workspace',

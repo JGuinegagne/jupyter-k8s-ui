@@ -1,9 +1,10 @@
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from './client';
 import type { CreateWorkspaceRequest, UpdateWorkspaceRequest, Workspace, AdvancedWorkspacePayload } from '../types';
-import { getWorkspaceStatus } from '../utils';
+import { findTrueCondition, getWorkspaceStatus, isOwnerOrPublic } from '../utils';
 import { isAuthError } from './auth-interceptor';
 import { useNamespace, namespaceKeys } from '../context/NamespaceContext';
+import { useAuth } from '../context/AuthContext';
 
 // Query keys include the namespace so cached data never leaks across namespaces. A
 // switch changes the key, so React Query fetches fresh rather than serving another
@@ -26,8 +27,11 @@ export const clusterAccessKeys = {
 };
 
 // Polling configuration
-const LIST_POLL_INTERVAL_MS = 60_000; // 60 seconds
-const DETAIL_POLL_INTERVAL_MS = 3_000; // 3 seconds (only while workspace is transitioning)
+export const LIST_POLL_INTERVAL_MS = 60_000; // 60 seconds
+export const FAST_POLL_INTERVAL_MS = 3_000; // 3 seconds (only while a workspace is transitioning)
+// A start still Progressing past the workspace Deployment's progress deadline (the Kubernetes default of 10
+// minutes) has stalled; the fast rate ends 5 minutes after that, and a late recovery shows at the list rate.
+export const FAST_POLL_MAX_AGE_MS = 15 * 60_000;
 
 export function useTemplates() {
   const { activeNamespace } = useNamespace();
@@ -63,16 +67,33 @@ export function useClusterAccess(enabled = true) {
   });
 }
 
-export function useWorkspaces() {
+// poll: false reads the list once for a page that shows no status, such as the create form.
+export function useWorkspaces({ poll = true }: { poll?: boolean } = {}) {
   const { activeNamespace } = useNamespace();
+  const { user } = useAuth();
   return useQuery({
     queryKey: workspaceKeys.all(activeNamespace),
-    queryFn: () => apiClient.listWorkspaces(activeNamespace),
-    enabled: Boolean(activeNamespace),
-    refetchInterval: (query) => {
-      if (query.state.error && isAuthError(query.state.error)) return false;
-      return LIST_POLL_INTERVAL_MS;
+    // a fetch a Start or Stop click cancelled can still resolve, with the object as it was before the click
+    queryFn: async ({ signal }) => {
+      const workspaces = await apiClient.listWorkspaces(activeNamespace);
+      if (!signal.aborted) forgetAnsweredRequests(workspaces);
+      return workspaces;
     },
+    enabled: Boolean(activeNamespace),
+    // The fast rate while a workspace this viewer waits on is transitioning: one they could open, or one this
+    // tab asked to start or stop. Every tab lists the namespace with its own token, so the scope bounds the load.
+    // A failed fetch keeps the previous list, so the error is checked first.
+    refetchInterval: poll
+      ? (query) => {
+          if (query.state.error) return isAuthError(query.state.error) ? false : LIST_POLL_INTERVAL_MS;
+          const now = Date.now();
+          // some() passes the index as the second argument, which the check would take as the clock
+          const watched = query.state.data?.some(
+            (workspace) => (isOwnerOrPublic(workspace, user?.k8sUser) || isWorkspaceRequested(workspace, now)) && isWorkspaceTransitioning(workspace, now),
+          );
+          return watched ? FAST_POLL_INTERVAL_MS : LIST_POLL_INTERVAL_MS;
+        }
+      : false,
     refetchIntervalInBackground: false,
   });
 }
@@ -87,15 +108,79 @@ export function isWorkspaceSettled(workspace: Workspace | undefined): boolean {
   return getWorkspaceStatus(workspace) === desired;
 }
 
+// Ages compare the browser clock with API server timestamps; a browser clock running ahead shortens the bound.
+// A missing timestamp cannot date the wait, so it counts as beyond the bound.
+const withinFastPollAge = (timestamp: string | undefined, now: number) => timestamp !== undefined && now - Date.parse(timestamp) < FAST_POLL_MAX_AGE_MS;
+
+// Start and Stop requests made from this tab, by namespace/name. Right after one the conditions still show
+// the old state (#51) and nothing on the object dates the wait, so the request time bounds the fast rate.
+const requestedAt = new Map<string, number>();
+
+const requestKey = (namespace: string | undefined, name: string) => `${namespace}/${name}`;
+
+export function markWorkspaceRequested(namespace: string | undefined, name: string, now = Date.now()): void {
+  requestedAt.set(requestKey(namespace, name), now);
+}
+
+export function forgetWorkspaceRequest(namespace: string | undefined, name: string): void {
+  requestedAt.delete(requestKey(namespace, name));
+}
+
+// Drops the requests the operator has answered, the workspace settled or an active condition dated after the
+// click, and any older than the bound. A Progressing condition from before the click keeps its old timestamp
+// when a Stop arrives mid-start, so only a newer one counts as an answer. The query functions call it, so the
+// map is current when the refetch interval is evaluated.
+export function forgetAnsweredRequests(workspaces: Workspace[], now = Date.now()): void {
+  for (const [key, at] of requestedAt) {
+    if (now - at >= FAST_POLL_MAX_AGE_MS) requestedAt.delete(key);
+  }
+  for (const workspace of workspaces) {
+    const key = requestKey(workspace.metadata.namespace, workspace.metadata.name);
+    const requested = requestedAt.get(key);
+    if (requested === undefined) continue;
+    const active = findTrueCondition(workspace, 'Progressing', 'Deleting');
+    // condition times carry whole seconds, so a transition in the click's second counts as after it
+    const recordedAfterRequest = active?.lastTransitionTime !== undefined && Date.parse(active.lastTransitionTime) >= Math.floor(requested / 1000) * 1000;
+    if (isWorkspaceSettled(workspace) || recordedAfterRequest) requestedAt.delete(key);
+  }
+}
+
+export function isWorkspaceRequested(workspace: Workspace, now = Date.now()): boolean {
+  const requested = requestedAt.get(requestKey(workspace.metadata.namespace, workspace.metadata.name));
+  return requested !== undefined && now - requested < FAST_POLL_MAX_AGE_MS;
+}
+
+// The fast rate follows an active transition for at most FAST_POLL_MAX_AGE_MS. Without one, Degraded and
+// Unknown count only after a Start or Stop this tab requested, so a workspace nobody touches does not keep
+// the fast rate. A read only; the request map changes in the mutations and in forgetAnsweredRequests.
+export function isWorkspaceTransitioning(workspace: Workspace, now = Date.now()): boolean {
+  if (isWorkspaceSettled(workspace)) return false;
+  const active = findTrueCondition(workspace, 'Progressing', 'Deleting');
+  // a Start or Stop on a long-stalled start still gets the fast rate: the aged condition keeps its old timestamp
+  if (active) return withinFastPollAge(active.lastTransitionTime, now) || isWorkspaceRequested(workspace, now);
+  const status = getWorkspaceStatus(workspace);
+  // the cache write right after a Start or Stop click re-evaluates the rate while the conditions still
+  // read the old state, Degraded included
+  if (status === 'Degraded' || status === 'Unknown') return isWorkspaceRequested(workspace, now);
+  // No conditions at all means the operator has not reconciled the workspace yet; its age bounds the rate.
+  if ((workspace.status?.conditions ?? []).length === 0) return withinFastPollAge(workspace.metadata.creationTimestamp, now);
+  return isWorkspaceRequested(workspace, now);
+}
+
 export function useWorkspace(name: string) {
   const { activeNamespace } = useNamespace();
   const result = useQuery({
     queryKey: workspaceKeys.detail(name, activeNamespace),
-    queryFn: () => apiClient.getWorkspace(name, activeNamespace),
+    queryFn: async ({ signal }) => {
+      const workspace = await apiClient.getWorkspace(name, activeNamespace);
+      if (!signal.aborted) forgetAnsweredRequests([workspace]);
+      return workspace;
+    },
     enabled: Boolean(name) && Boolean(activeNamespace),
+    // The list's two rates, so a Degraded workspace left open does not poll fast without end.
     refetchInterval: (query) => {
-      if (query.state.error && isAuthError(query.state.error)) return false;
-      return isWorkspaceSettled(query.state.data) ? false : DETAIL_POLL_INTERVAL_MS;
+      if (query.state.error) return isAuthError(query.state.error) ? false : LIST_POLL_INTERVAL_MS;
+      return query.state.data && isWorkspaceTransitioning(query.state.data) ? FAST_POLL_INTERVAL_MS : LIST_POLL_INTERVAL_MS;
     },
     refetchIntervalInBackground: false,
   });
@@ -225,6 +310,8 @@ export function useStartWorkspace() {
     // Optimistic update — polling will reconcile with real state
     onMutate: async (name) => {
       await queryClient.cancelQueries({ queryKey: listKey });
+      const requested = Date.now();
+      markWorkspaceRequested(activeNamespace, name, requested);
       const previousWorkspaces = queryClient.getQueryData<Workspace[]>(listKey);
 
       queryClient.setQueryData<Workspace[]>(
@@ -232,13 +319,16 @@ export function useStartWorkspace() {
         (old) => old?.map((ws) => (ws.metadata.name === name ? { ...ws, spec: { ...ws.spec, desiredStatus: 'Running' as const } } : ws)) ?? [],
       );
 
-      return { previousWorkspaces, name };
+      return { previousWorkspaces, name, requested };
     },
-    onError: (_err, _name, context) => {
+    onError: (_err, name, context) => {
+      forgetWorkspaceRequest(activeNamespace, name);
       if (context?.previousWorkspaces) {
         queryClient.setQueryData(listKey, context.previousWorkspaces);
       }
     },
+    // a list fetch that raced the PATCH saw the settled object and forgot the request made in onMutate
+    onSuccess: (_data, name, context) => markWorkspaceRequested(activeNamespace, name, context?.requested),
     onSettled: (_data, _err, name) => {
       queryClient.invalidateQueries({ queryKey: listKey });
       queryClient.invalidateQueries({ queryKey: workspaceKeys.detail(name, activeNamespace) });
@@ -256,6 +346,8 @@ export function useStopWorkspace() {
     // Optimistic update — polling will reconcile with real state
     onMutate: async (name) => {
       await queryClient.cancelQueries({ queryKey: listKey });
+      const requested = Date.now();
+      markWorkspaceRequested(activeNamespace, name, requested);
       const previousWorkspaces = queryClient.getQueryData<Workspace[]>(listKey);
 
       queryClient.setQueryData<Workspace[]>(
@@ -263,13 +355,16 @@ export function useStopWorkspace() {
         (old) => old?.map((ws) => (ws.metadata.name === name ? { ...ws, spec: { ...ws.spec, desiredStatus: 'Stopped' as const } } : ws)) ?? [],
       );
 
-      return { previousWorkspaces, name };
+      return { previousWorkspaces, name, requested };
     },
-    onError: (_err, _name, context) => {
+    onError: (_err, name, context) => {
+      forgetWorkspaceRequest(activeNamespace, name);
       if (context?.previousWorkspaces) {
         queryClient.setQueryData(listKey, context.previousWorkspaces);
       }
     },
+    // a list fetch that raced the PATCH saw the settled object and forgot the request made in onMutate
+    onSuccess: (_data, name, context) => markWorkspaceRequested(activeNamespace, name, context?.requested),
     onSettled: (_data, _err, name) => {
       queryClient.invalidateQueries({ queryKey: listKey });
       queryClient.invalidateQueries({ queryKey: workspaceKeys.detail(name, activeNamespace) });

@@ -175,17 +175,30 @@ export function isOwner(owner: string | undefined, k8sUser: string | null | unde
   return owner === k8sUser;
 }
 
+// Whether the viewer may open this workspace once it runs: its owner, or anyone for a Public one.
+export function isOwnerOrPublic(workspace: Workspace, k8sUser: string | null | undefined): boolean {
+  return isOwner(getWorkspaceOwner(workspace), k8sUser) || workspace.spec.accessType === 'Public';
+}
+
+// Structural so callers can pass a full Workspace or only its spec and conditions.
+interface WorkspaceConditions {
+  spec: { desiredStatus?: string };
+  status?: { conditions?: Array<{ type: string; status: string; reason?: string; message?: string }> };
+}
+
+// The condition of one of the given types whose status is True, if any.
+export function findTrueCondition<C extends { type: string; status: string }>(workspace: { status?: { conditions?: C[] } }, ...types: string[]): C | undefined {
+  return workspace.status?.conditions?.find((c) => c.status === 'True' && types.includes(c.type));
+}
+
 /**
  * Derive a single display status from workspace conditions.
  * Priority: Deleting > Degraded > Progressing (Starting/Stopping) > Available > Stopped.
  * Falls back to desiredStatus when no conditions exist (before first controller reconcile).
  */
-export function getWorkspaceStatus(workspace: {
-  spec: { desiredStatus?: string };
-  status?: { conditions?: Array<{ type: string; status: string }> };
-}): WorkspaceStatus {
+export function getWorkspaceStatus(workspace: WorkspaceConditions): WorkspaceStatus {
   const conditions = workspace.status?.conditions ?? [];
-  const has = (type: string) => conditions.some((c) => c.type === type && c.status === 'True');
+  const has = (type: string) => Boolean(findTrueCondition(workspace, type));
 
   if (has('Deleting')) return 'Deleting';
   if (has('Degraded')) return 'Degraded';
@@ -195,6 +208,34 @@ export function getWorkspaceStatus(workspace: {
 
   if (!conditions.length) return workspace.spec.desiredStatus === 'Running' ? 'Starting' : 'Stopped';
   return 'Unknown';
+}
+
+// Progressing reasons the operator records while a start is under way (jupyter-k8s#490); an operator
+// that records none leaves the bare status word.
+const START_STEP_DETAILS = new Map<string, string>([
+  ['WaitingForNode', strings.workspace.startStepWaitingForNode],
+  ['PullingImage', strings.workspace.startStepPullingImage],
+  ['StartingContainer', strings.workspace.startStepStartingContainer],
+]);
+
+export interface WorkspaceStatusLabel {
+  // The status word, followed by the start step or the Degraded reason when the operator recorded one.
+  label: string;
+  // The message recorded on the condition the label is derived from; shown on hover.
+  title?: string;
+}
+
+export function getWorkspaceStatusLabel(workspace: WorkspaceConditions): WorkspaceStatusLabel {
+  const status = getWorkspaceStatus(workspace);
+  if (status !== 'Starting' && status !== 'Degraded') return { label: status };
+  const type = status === 'Starting' ? 'Progressing' : 'Degraded';
+  const condition = findTrueCondition(workspace, type);
+  const reason = condition?.reason ?? '';
+  const detail = status === 'Starting' ? START_STEP_DETAILS.get(reason) : reason;
+  return {
+    label: detail ? strings.workspace.statusDetail(status, detail) : status,
+    title: condition?.message || undefined,
+  };
 }
 
 // Default 63: workspace names are used in DNS labels. Server allows up to 253 (K8s resource limit).
