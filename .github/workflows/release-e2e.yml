@@ -55,3 +55,20 @@ jobs:
           done
           echo "::error::Image did not become healthy within 30s"
           exit 1
+
+      # The image floats on oven/bun:1 and the TLS policy depends on Bun behaviour, so check
+      # it on the Bun this image actually ships before it can be promoted.
+      - name: Checkout smoke-test script
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/smoke-tls.ts
+          sparse-checkout-cone-mode: false
+
+      # Runs the script on the runner; the TLS checks themselves run inside the image.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Verify HTTPS and the TLS policy
+        run: bun scripts/smoke-tls.ts "${{ env.STAGING_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}"
