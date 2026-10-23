@@ -1,7 +1,8 @@
-import { serve } from 'bun';
 import { initializeConfig, serverConfig } from './k8s/config';
 import { log } from './logger';
 import { handleRequest } from './middleware/router';
+import { startListener, type Listener } from './listener';
+import { resolveTlsFiles } from './tls';
 import { initSecretWatcher, stopSecretWatcher } from './secret-watcher';
 import { initSchemaStore } from './schema/store';
 import { initNamespaceUniverse, stopNamespaceUniverse } from './k8s/namespace-universe';
@@ -18,6 +19,7 @@ console.log(`   NODE_ENV:  ${process.env.NODE_ENV || 'production'}`);
 console.log(`   PORT:      ${serverConfig.port}`);
 console.log(`   NAMESPACE: ${serverConfig.namespace}`);
 console.log(`   LOG_LEVEL: ${serverConfig.logLevel}`);
+console.log(`   TLS:       ${serverConfig.tls.certFile || serverConfig.tls.keyFile ? 'enabled' : 'disabled'}`);
 console.log(`   STATIC:    ${serverConfig.staticDir}`);
 console.log(`   DEV_TOKEN: ${serverConfig.devAccessToken ? '***set***' : 'not set'}`);
 console.log(`   SESSION:   ${serverConfig.session.enabled ? 'enabled' : 'disabled'}`);
@@ -45,13 +47,22 @@ initNamespaceUniverse().catch((err) => {
   log('error', `Failed to initialize namespace universe: ${err instanceof Error ? err.message : String(err)}`);
 });
 
-const server = serve({
-  port: serverConfig.port,
-  fetch: handleRequest,
-  idleTimeout: 0,
-});
+// Fail fast on a TLS misconfiguration (one path only, unreadable or mismatched keypair):
+// never fall back to plain HTTP when TLS was asked for.
+let server: Listener;
+try {
+  server = startListener({
+    port: serverConfig.port,
+    fetch: handleRequest,
+    tls: resolveTlsFiles(serverConfig.tls.certFile, serverConfig.tls.keyFile),
+    tlsReloadIntervalMs: serverConfig.tls.reloadIntervalSecs * 1000,
+  });
+} catch (err) {
+  log('error', `Failed to start server: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
 
-log('info', `Server running at http://localhost:${server.port}`);
+log('info', `Server running at ${server.protocol}://localhost:${server.port}`);
 
 // Graceful shutdown on K8s/Docker terminate signals
 async function shutdown() {
