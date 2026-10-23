@@ -152,6 +152,14 @@ validation layer.
   validation layers — YAML syntax, CRD schema (from `GET /crd-schema/workspaces`),
   advisory template bounds/allowed-images, and authoritative `?dryRun=All`.
 - The **edit route** (`/workspace/:name/edit`) defaults to simple editor, with a button to access the YAML editor. If the workspace references a template, the simple editor locks it.
+- **Optional HTTPS** (`server/tls.ts`, `server/listener.ts`): off unless `TLS_CERT_FILE` + `TLS_KEY_FILE`
+  are set. The keypair is re-read on a poll; because `server.reload()` can't change the cert, a
+  rotation starts a second `Bun.serve` on the same port (`reusePort`) and gracefully stops the old
+  one. One fixed policy, `TLS_POLICY` (TLS 1.3 only, pinned groups). Its options are undocumented in Bun and silently ignored before 1.4.4, so
+  TLS refuses to start on older Bun. Bun is not pinned (`oven/bun:1`): the release smoke test
+  (`scripts/smoke-tls.ts`) checks the policy on each staged image, and
+  `tls-listener.test.ts` checks the policy with an OpenSSL >= 3.5 client. Run those tests
+  on Bun >= 1.4.4 locally.
 - CRD spec schemas are read **once at startup** into an in-memory singleton
   (`server/schema/store.ts`): live cluster read via the service account, falling back
   to vendored `server/schema/vendored/*.json` (regenerate with `bun run gen:crd`).
