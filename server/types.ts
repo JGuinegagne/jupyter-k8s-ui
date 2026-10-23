@@ -258,6 +258,14 @@ export interface NamespaceConfig {
   pollIntervalSecs: number;
 }
 
+export interface TlsConfig {
+  // PEM certificate (leaf first, chain optional) and private key. Both empty = plain HTTP.
+  certFile: string;
+  keyFile: string;
+  // How often the keypair is re-read to pick up a rotated certificate; 0 disables.
+  reloadIntervalSecs: number;
+}
+
 export interface ServerConfig {
   namespace: string;
   // Shared namespace where admins publish cluster-wide templates / access
@@ -268,6 +276,7 @@ export interface ServerConfig {
   devAccessToken: string;
   port: number;
   logLevel: LogLevel;
+  tls: TlsConfig;
   session: SessionConfig;
   clusterAccess: ClusterAccessConfig;
   namespaceSelection: NamespaceConfig;

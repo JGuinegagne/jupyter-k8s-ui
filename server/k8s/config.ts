@@ -19,6 +19,11 @@ export const serverConfig: ServerConfig = {
   devAccessToken: '',
   port: 8090,
   logLevel: 'info',
+  tls: {
+    certFile: '',
+    keyFile: '',
+    reloadIntervalSecs: 60,
+  },
   session: {
     enabled: false,
     cookieName: 'workspace_console_session',
@@ -98,6 +103,10 @@ export function initializeConfig(): void {
   serverConfig.devAccessToken = isDev ? process.env.DEV_ACCESS_TOKEN || '' : '';
   serverConfig.port = parseIntSafe(process.env.PORT, 8090);
   serverConfig.logLevel = (process.env.LOG_LEVEL as ServerConfig['logLevel']) || (isDev ? 'debug' : 'info');
+
+  serverConfig.tls.certFile = process.env.TLS_CERT_FILE || '';
+  serverConfig.tls.keyFile = process.env.TLS_KEY_FILE || '';
+  serverConfig.tls.reloadIntervalSecs = parseIntSafe(process.env.TLS_RELOAD_INTERVAL_SECS, 60);
 
   if (!isDev && process.env.DEV_ACCESS_TOKEN) {
     console.warn('⚠️  WARNING: DEV_ACCESS_TOKEN is set but will be ignored in production mode');
