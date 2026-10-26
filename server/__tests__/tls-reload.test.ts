@@ -1,12 +1,14 @@
-import { describe, test, expect, mock } from 'bun:test';
-import { makeReloadTls, type Served } from '../listener';
+import { describe, test, expect, mock, spyOn, beforeEach, afterAll } from 'bun:test';
+import { EXPIRY_WARNING_MS, makeReloadTls, type Served } from '../listener';
 import type { TlsFiles, TlsKeypair } from '../tls';
 
 // The reload step in isolation: keypair loading and server start are fakes, so each test
 // pins one decision (swap or keep) without sockets or certificates.
 
 const files: TlsFiles = { certFile: '/tls/tls.crt', keyFile: '/tls/tls.key' };
-const pair = (name: string): TlsKeypair => ({ cert: `cert-${name}`, key: `key-${name}`, notAfter: new Date(Date.now() + 86_400_000) });
+// A fixed notAfter, so two pair('b') calls are equal however much time passes between them.
+const NOT_AFTER = new Date('2100-01-01T00:00:00Z');
+const pair = (name: string): TlsKeypair => ({ cert: `cert-${name}`, key: `key-${name}`, notAfter: NOT_AFTER });
 
 interface FakeServer {
   name: string;
@@ -14,7 +16,7 @@ interface FakeServer {
 }
 const fakeServer = (name: string): FakeServer => ({ name, stop: mock(() => undefined) });
 
-function setup(opts: { load: () => TlsKeypair; listen?: (p: TlsKeypair) => FakeServer }) {
+function setup(opts: { load: () => TlsKeypair; listen?: (p: TlsKeypair) => FakeServer; now?: () => number }) {
   let served: Served<FakeServer> = { keypair: pair('a'), server: fakeServer('a') };
   const original = served.server;
   const listen = mock(opts.listen ?? ((p: TlsKeypair) => fakeServer(p.cert)));
@@ -26,6 +28,7 @@ function setup(opts: { load: () => TlsKeypair; listen?: (p: TlsKeypair) => FakeS
     set: (next) => {
       served = next;
     },
+    now: opts.now,
   });
   return { reload, listen, original, served: () => served };
 }
@@ -75,5 +78,39 @@ describe('makeReloadTls', () => {
     t.reload();
     expect(t.reload()).toBe(false);
     expect(t.listen).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Renewal stuck upstream (broken issuer, stuck Secret): the files never change, so the
+// unchanged path is the only one that can report it.
+describe('makeReloadTls: unrenewed certificate', () => {
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const error = spyOn(console, 'error').mockImplementation(() => {});
+  beforeEach(() => {
+    warn.mockClear();
+    error.mockClear();
+  });
+  afterAll(() => {
+    warn.mockRestore();
+    error.mockRestore();
+  });
+  const at = (msBeforeNotAfter: number) => () => NOT_AFTER.getTime() - msBeforeNotAfter;
+  const logged = (spy: typeof warn) => spy.mock.calls.map((c) => c.join(' ')).join('\n');
+
+  test('far from notAfter → nothing logged', () => {
+    setup({ load: () => pair('a'), now: at(EXPIRY_WARNING_MS + 60_000) }).reload();
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  test('inside the warning window → warns on the poll', () => {
+    setup({ load: () => pair('a'), now: at(EXPIRY_WARNING_MS - 60_000) }).reload();
+    expect(logged(warn)).toContain('has not been renewed');
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  test('past notAfter → logs an error on the poll', () => {
+    setup({ load: () => pair('a'), now: at(-60_000) }).reload();
+    expect(logged(error)).toContain('expired');
   });
 });
