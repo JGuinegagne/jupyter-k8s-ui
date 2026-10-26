@@ -3,17 +3,19 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { assertTlsRuntime, loadKeypair, MIN_BUN_FOR_TLS, resolveTlsFiles } from '../tls';
-import { makeKeypair } from './tls-helpers';
+import { makeKeypair, tlsTestPrereqs } from './tls-helpers';
 
+const { opensslFound } = tlsTestPrereqs();
 let dir: string;
 
 beforeAll(() => {
+  if (!opensslFound) return;
   dir = mkdtempSync(join(tmpdir(), 'tls-test-'));
   makeKeypair(dir, 'a');
   makeKeypair(dir, 'b');
 });
 
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+afterAll(() => dir && rmSync(dir, { recursive: true, force: true }));
 
 describe('resolveTlsFiles', () => {
   test('neither path → plain HTTP (off by default)', () => {
@@ -28,7 +30,7 @@ describe('resolveTlsFiles', () => {
   });
 });
 
-describe('loadKeypair', () => {
+describe.skipIf(!opensslFound)('loadKeypair', () => {
   test('matching pair loads with its expiry', () => {
     const pair = loadKeypair({ certFile: join(dir, 'a.crt'), keyFile: join(dir, 'a.key') });
     expect(pair.notAfter.getTime()).toBeGreaterThan(Date.now());

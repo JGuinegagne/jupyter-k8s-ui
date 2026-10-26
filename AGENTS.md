@@ -158,8 +158,9 @@ validation layer.
   one. One fixed policy, `TLS_POLICY` (TLS 1.3 only, pinned groups). Its options are undocumented in Bun and silently ignored before 1.4.4, so
   TLS refuses to start on older Bun. Bun is not pinned (`oven/bun:1`): the release smoke test
   (`scripts/smoke-tls.ts`) checks the policy on each staged image, and
-  `tls-listener.test.ts` checks the policy with an OpenSSL >= 3.5 client. Run those tests
-  on Bun >= 1.4.4 locally.
+  `tls-listener.test.ts` checks it with an OpenSSL >= 3.5 client. Locally the TLS tests need
+  Bun >= 1.4.4 and OpenSSL >= 3.5 (on macOS, Homebrew's `openssl` ahead of LibreSSL in `PATH`);
+  without them they skip with the reason printed. Under `CI` they never skip, they fail.
 - CRD spec schemas are read **once at startup** into an in-memory singleton
   (`server/schema/store.ts`): live cluster read via the service account, falling back
   to vendored `server/schema/vendored/*.json` (regenerate with `bun run gen:crd`).

@@ -24,6 +24,10 @@ jobs:
     permissions:
       contents: read
       packages: read
+    # Passed to the steps through the environment, never interpolated into `run:` scripts,
+    # so a crafted version string cannot inject shell.
+    env:
+      VERSION: ${{ inputs.version }}
     steps:
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -33,17 +37,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull staged image
-        run: docker pull "${{ env.STAGING_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}"
+        run: docker pull "$STAGING_REGISTRY/$IMAGE_NAME:$VERSION"
 
       - name: Start container and verify health
         run: |
-          IMAGE="${{ env.STAGING_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}"
           CID=$(docker run -d \
             -p 8090:8090 \
             -e NODE_ENV=production \
             -e SESSION_ENABLED=false \
             -e PORT=8090 \
-            "$IMAGE")
+            "$STAGING_REGISTRY/$IMAGE_NAME:$VERSION")
           trap "docker logs $CID || true; docker stop $CID || true" EXIT
 
           for i in $(seq 1 30); do
@@ -71,4 +74,4 @@ jobs:
           bun-version: latest
 
       - name: Verify HTTPS and the TLS policy
-        run: bun scripts/smoke-tls.ts "${{ env.STAGING_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}"
+        run: bun scripts/smoke-tls.ts "$STAGING_REGISTRY/$IMAGE_NAME:$VERSION"

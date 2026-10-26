@@ -1,6 +1,50 @@
 import { spawnSync } from 'bun';
 import { copyFileSync, existsSync, mkdirSync, readlinkSync, renameSync, rmSync, symlinkSync } from 'fs';
 import { join } from 'path';
+import { MIN_BUN_FOR_TLS } from '../tls';
+
+/** Exit code and stdout of an `openssl` command; null when there is no `openssl` binary. */
+function tryOpenssl(args: string[]): { code: number; out: string } | null {
+  try {
+    const res = spawnSync(['openssl', ...args], { stdout: 'pipe', stderr: 'pipe' });
+    return { code: res.exitCode, out: res.stdout.toString() };
+  } catch {
+    return null;
+  }
+}
+
+export interface TlsTestPrereqs {
+  // Bun enforces TLS_POLICY (TLS refuses to start on older Bun).
+  runtimeOk: boolean;
+  // An `openssl` binary exists, to generate fixtures.
+  opensslFound: boolean;
+  // The `openssl` client can offer every group in `groups` (OpenSSL >= 3.5; macOS's LibreSSL
+  // has no `list -tls-groups`).
+  missingGroups: string[];
+}
+
+/**
+ * Check the TLS test prerequisites. Locally a missing one skips the dependent tests with a
+ * printed reason; under CI it throws, so the TLS tests can never be skipped there.
+ */
+export function tlsTestPrereqs(groups: string[] = []): TlsTestPrereqs {
+  const runtimeOk = Bun.semver.satisfies(Bun.version, `>=${MIN_BUN_FOR_TLS}`);
+  const opensslFound = tryOpenssl(['version']) !== null;
+  const listed = groups.length ? tryOpenssl(['list', '-tls-groups']) : null;
+  const offered = new Set(listed?.code === 0 ? listed.out.trim().split(':') : []);
+  const missingGroups = groups.filter((g) => !offered.has(g));
+
+  const why = [
+    !runtimeOk && `Bun ${Bun.version} < ${MIN_BUN_FOR_TLS}`,
+    !opensslFound && 'no openssl binary',
+    opensslFound && missingGroups.length > 0 && `openssl cannot offer ${missingGroups.join(', ')} (need OpenSSL >= 3.5)`,
+  ].filter(Boolean);
+  if (why.length) {
+    if (process.env.CI) throw new Error(`CI must run the TLS tests: ${why.join('; ')}`);
+    console.warn(`Skipping TLS tests that need: ${why.join('; ')}`);
+  }
+  return { runtimeOk, opensslFound, missingGroups };
+}
 
 function openssl(args: string[]): void {
   const res = spawnSync(['openssl', ...args], { stderr: 'pipe' });
