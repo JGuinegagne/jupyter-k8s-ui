@@ -38,7 +38,12 @@ export interface ReloadTlsDeps<S extends Stoppable> {
   listen: (pair: TlsKeypair) => S;
   get: () => Served<S>;
   set: (next: Served<S>) => void;
+  now?: () => number;
 }
+
+// How long before notAfter an unrenewed certificate starts being reported on every poll.
+// cert-manager renews well before this, so reaching it means renewal is stuck.
+export const EXPIRY_WARNING_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Build the reload step run on each poll: re-read the keypair and, if it changed, start a
@@ -46,7 +51,7 @@ export interface ReloadTlsDeps<S extends Stoppable> {
  * failure keeps the current pair and server, and the next poll retries.
  */
 export const makeReloadTls =
-  <S extends Stoppable>({ files, load, listen, get, set }: ReloadTlsDeps<S>): (() => boolean) =>
+  <S extends Stoppable>({ files, load, listen, get, set, now = Date.now }: ReloadTlsDeps<S>): (() => boolean) =>
   () => {
     const current = get();
 
@@ -58,7 +63,12 @@ export const makeReloadTls =
       log('warn', `TLS reload skipped, still serving the current certificate: ${errorMessage(err)}`);
       return false;
     }
-    if (sameKeypair(next, current.keypair)) return false;
+    if (sameKeypair(next, current.keypair)) {
+      // The files never change when renewal is stuck, so this is the only place that notices.
+      // Logged rather than failing /health: failing readiness would take out every replica.
+      reportUnrenewed(files, current.keypair, now());
+      return false;
+    }
 
     let server: S;
     try {
@@ -132,6 +142,15 @@ export function startListener(opts: ListenerOptions): Listener {
       void server.stop();
     },
   };
+}
+
+function reportUnrenewed(files: TlsFiles, pair: TlsKeypair, now: number): void {
+  const left = pair.notAfter.getTime() - now;
+  if (left <= 0) {
+    log('error', `TLS certificate ${files.certFile} expired at ${pair.notAfter.toISOString()} and has not been renewed`);
+  } else if (left < EXPIRY_WARNING_MS) {
+    log('warn', `TLS certificate ${files.certFile} expires at ${pair.notAfter.toISOString()} and has not been renewed`);
+  }
 }
 
 function logCertificate(action: string, files: TlsFiles, pair: TlsKeypair): void {
