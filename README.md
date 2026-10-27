@@ -152,6 +152,30 @@ subjects:
 | `NAMESPACE_CANDIDATE_CAP`            | `20`                                       | SSAR fan-out page size (candidates checked per `/namespaces` page)                              |
 | `NAMESPACE_VISIBLE_PERSIST_CAP`      | `100`                                      | Max visible namespaces stored in the preference cookie (further pages served live, client-only) |
 | `NAMESPACE_POLL_INTERVAL_SECS`       | `60`                                       | Universe re-LIST poll interval                                                                  |
+| `TLS_CERT_FILE`                      | _(unset)_                                  | PEM certificate (leaf first, chain optional). Set with `TLS_KEY_FILE` to serve HTTPS            |
+| `TLS_KEY_FILE`                       | _(unset)_                                  | PEM private key matching `TLS_CERT_FILE`                                                        |
+| `TLS_RELOAD_INTERVAL_SECS`           | `60`                                       | How often the keypair is re-read to pick up a rotated certificate (`0` disables)                |
+
+### HTTPS
+
+With `TLS_CERT_FILE` and `TLS_KEY_FILE` unset the server speaks plain HTTP. With both set it
+serves HTTPS on `PORT`, and refuses to start if a file is unreadable or the key doesn't match
+the certificate. Setting only one of the two
+is also a startup error.
+
+The TLS configuration is fixed, not configurable: TLS 1.3 only, with the key-exchange groups
+`X25519MLKEM768`, `X25519`, `P-256`, `P-384` and `P-521`, and the three TLS 1.3 AEAD suites.
+TLS 1.2 is not offered because Bun cannot stop it signing with SHA-1. A narrower set (for
+example without ChaCha20 or X25519) is not possible: Bun cannot remove them from TLS 1.3. Serving TLS requires Bun 1.4.4 or later (older versions silently ignore these
+settings, so the server refuses to start on them). The image builds on `oven/bun:1`, and
+the release pipeline checks the TLS policy on each staged image (`scripts/smoke-tls.ts`).
+
+Mount the certificate Secret (for example one issued by cert-manager) as a volume and point
+the two variables at its `tls.crt` and `tls.key`. The server re-reads them every
+`TLS_RELOAD_INTERVAL_SECS` and serves a renewed certificate without a restart. Don't mount
+them with `subPath`: Kubernetes never updates `subPath` mounts, so the server would keep the
+original certificate until the pod restarts. Point HTTP probes at `/api/v1/health` with
+`scheme: HTTPS`; the kubelet doesn't verify the certificate.
 
 ## Contributing
 

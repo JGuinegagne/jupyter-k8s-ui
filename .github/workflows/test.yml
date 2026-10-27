@@ -10,14 +10,15 @@ jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
+    # Run in the Bun image instead of using setup-bun on the runner. Bun itself would install
+    # fine; the reason is the OpenSSL client. The TLS policy tests (tls-listener.test.ts) use
+    # the system `openssl s_client` and first check it can offer every key-exchange group they
+    # test. The Ubuntu runner ships OpenSSL 3.0, which cannot offer X25519MLKEM768 (3.5+), so
+    # that check would fail; this image ships 3.5+. It is also the image the server ships on.
+    container: oven/bun:1
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
